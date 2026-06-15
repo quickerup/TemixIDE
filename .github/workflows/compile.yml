@@ -1,0 +1,54 @@
+name: TemixIDE Remote Compiler
+
+on:
+  repository_dispatch:
+    types: [compile_contract]
+  workflow_dispatch:
+    inputs:
+      contract_path:
+        description: 'Path to the .tact file'
+        required: true
+        default: 'contract.tact'
+
+jobs:
+  compile:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '18'
+          cache: 'npm'
+
+      - name: Install Dependencies
+        run: npm install
+
+      - name: Compile Contract
+        run: |
+          # Use the input path or the one provided in the dispatch payload
+          CONTRACT_PATH="${{ github.event.inputs.contract_path || github.event.client_payload.contract_path }}"
+          echo "Compiling $CONTRACT_PATH..."
+          
+          # Create a temporary tact config
+          cat <<EOF > temp_config.json
+          {
+            "projects": [{
+              "name": "remote_build",
+              "path": "./$CONTRACT_PATH",
+              "output": "./build",
+              "options": { "debug": true }
+            }]
+          }
+          EOF
+          
+          npx tact --config temp_config.json
+
+      - name: Upload Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: compiled-artifacts
+          path: build/
+          retention-days: 1
