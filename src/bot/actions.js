@@ -7,8 +7,49 @@ const state = require('../services/state');
 const ton = require('../services/ton');
 const tonUtils = require('../services/ton-utils');
 const compiler = require('../services/compiler');
-const ai = require('../services/ai');
 const { setUserState, clearUserState, getUserState } = require('./utils');
+
+function getAllSourceFiles(dir, base = '', exts = ['.tact', '.fc', '.func', '.tolk']) {
+    let results = [];
+    if (!fs.existsSync(dir)) return results;
+    
+    const list = fs.readdirSync(dir);
+    list.forEach(file => {
+        const fullPath = path.join(dir, file);
+        const relPath = path.join(base, file);
+        const stat = fs.statSync(fullPath);
+        
+        if (stat.isDirectory()) {
+            if (file !== 'build' && file !== 'node_modules' && !file.startsWith('.')) {
+                results = results.concat(getAllSourceFiles(fullPath, relPath, exts));
+            }
+        } else if (exts.some(ext => file.endsWith(ext))) {
+            results.push(relPath);
+        }
+    });
+    return results;
+}
+
+function getArtifactPaths(buildDir, name) {
+    let baseName = name;
+    let codePath = path.join(buildDir, `${baseName}.code.boc`);
+    let abiPath = path.join(buildDir, `${baseName}.abi`);
+    let pkgPath = path.join(buildDir, `${baseName}.pkg`);
+    let dataPath = path.join(buildDir, `${baseName}.data.boc`);
+    
+    if (!fs.existsSync(codePath) || !fs.existsSync(abiPath)) {
+        const files = fs.readdirSync(buildDir);
+        const match = files.find(f => f.endsWith(`_${name}.code.boc`) || f === `${name}.code.boc`);
+        if (match) {
+            baseName = match.replace('.code.boc', '');
+            codePath = path.join(buildDir, `${baseName}.code.boc`);
+            abiPath = path.join(buildDir, `${baseName}.abi`);
+            pkgPath = path.join(buildDir, `${baseName}.pkg`);
+            dataPath = path.join(buildDir, `${baseName}.data.boc`);
+        }
+    }
+    return { baseName, codePath, abiPath, pkgPath, dataPath };
+}
 
 async function handleAction(bot, query) {
   const chatId = query.message.chat.id;
@@ -76,14 +117,35 @@ async function handleAction(bot, query) {
   }
 
   if (data === 'workspace_menu') {
-    return sendOrEdit(`📂 <b>Workspace</b>\nFocuses on your local environment and project history.\n\n📁 <b>Files:</b> Your central hub for managing .tact source files.\n📂 <b>Sessions:</b> Manage multiple project workspaces.\n📋 <b>History:</b> Tracking your previous deployments and interactions.\n⚙️ <b>Help:</b> Documentation and guides to help you navigate the IDE.`, {
+    return sendOrEdit(`📂 <b>Workspace</b>\nFocuses on your local environment and project history.\n\n📁 <b>Files:</b> Your central hub for managing TON source files.\n📂 <b>Sessions:</b> Manage multiple project workspaces.\n📝 <b>Paste Code:</b> Quick-add contract code by pasting it here.\n🔗 <b>GitHub Import:</b> Extract TON contracts from any GitHub repo.\n📋 <b>History:</b> Tracking your previous deployments and interactions.\n⚙️ <b>Help:</b> Documentation and guides to help you navigate the IDE.`, {
       reply_markup: {
         inline_keyboard: [
           [{ text: '📁 Files', callback_data: 'files_list' }, { text: '📂 Sessions', callback_data: 'sessions_menu' }],
+          [{ text: '📝 Paste Code', callback_data: 'paste_code' }, { text: '🔗 GitHub Import', callback_data: 'github_import' }],
           [{ text: '📋 History', callback_data: 'history' }],
           [{ text: '⚙️ Help', callback_data: 'help' }],
           [{ text: '⬅️ Back', callback_data: 'menu' }]
         ]
+      },
+      parse_mode: 'HTML'
+    });
+  }
+
+  if (data === 'github_import') {
+    setUserState(chatId, { action: 'awaiting_github_link' });
+    return sendOrEdit(`🔗 <b>GitHub Import</b>\n\nPlease send me a link to a GitHub repository.\n\nTemix will automatically:\n1. Clone the repository.\n2. Extract all <code>.tact</code>, <code>.fc</code>, and <code>.func</code> files.\n3. Create a fresh session for you.\n\n<b>Example:</b> <code>https://github.com/evaafi/contracts</code>`, {
+      reply_markup: {
+        inline_keyboard: [[{ text: '⬅️ Cancel', callback_data: 'workspace_menu' }]]
+      },
+      parse_mode: 'HTML'
+    });
+  }
+
+  if (data === 'paste_code') {
+    setUserState(chatId, { action: 'awaiting_paste_code' });
+    return sendOrEdit(`📝 <b>Paste Code</b>\n\nPlease paste your Tact smart contract code below as a single message. The filename will be automatically determined.`, {
+      reply_markup: {
+        inline_keyboard: [[{ text: '⬅️ Cancel', callback_data: 'workspace_menu' }]]
       },
       parse_mode: 'HTML'
     });
@@ -178,8 +240,8 @@ async function handleAction(bot, query) {
 
   if (data === 'compile_menu') {
     const sessionPath = state.getSessionPath();
-    const files = fs.readdirSync(sessionPath).filter(f => f.endsWith('.tact'));
-    if (files.length === 0) return bot.sendMessage(chatId, "❌ No .tact files found in this session.");
+    const files = getAllSourceFiles(sessionPath);
+    if (files.length === 0) return bot.sendMessage(chatId, "❌ No source files (.tact, .fc, .tolk, etc.) found in this session.");
     
     return sendOrEdit(`🔨 <b>Select file to compile:</b>\nSession: <code>${state.state.currentSession}</code>`, {
       reply_markup: {
@@ -219,7 +281,7 @@ async function handleAction(bot, query) {
       reply_markup: {
         inline_keyboard: [
           ...contracts.map(c => [{ text: `🕹 ${c}`, callback_data: `int_methods:${state.getShort(c)}` }]),
-          [{ text: '🎯 Manual Address', callback_data: 'prep_manual_int' }],
+          [{ text: '🎯 Manual Address', callback_data: 'prep_manual_addr:int' }],
           [{ text: '⬅️ Back', callback_data: 'menu' }]
         ]
       },
@@ -229,25 +291,49 @@ async function handleAction(bot, query) {
 
   if (data === 'getters_menu') {
     const contracts = Object.keys(state.getSession().deployed);
-    if (contracts.length === 0) return bot.sendMessage(chatId, "❌ No deployed contracts. Deploy one first!");
 
-    return sendOrEdit("🔍 *Select contract to query:*", {
+    return sendOrEdit("🔍 <b>Select contract to query:</b>", {
       reply_markup: {
         inline_keyboard: [
           ...contracts.map(c => [{ text: `📜 ${c}`, callback_data: `get_methods:${state.getShort(c)}` }]),
-          [{ text: '⬅️ Back', callback_data: 'getters_menu' }]
+          [{ text: '🎯 Manual Address', callback_data: 'prep_manual_addr:get' }],
+          [{ text: '⬅️ Back', callback_data: 'menu' }]
         ]
       },
-      parse_mode: 'Markdown'
+      parse_mode: 'HTML'
     });
   }
 
+  if (data.startsWith('prep_manual_addr:')) {
+    const type = data.split(':')[1];
+    const { setUserState } = require('./utils');
+    setUserState(chatId, { action: 'awaiting_manual_addr', mode: type });
+    return bot.sendMessage(chatId, "🎯 <b>Enter the contract address you want to interact with:</b>", { parse_mode: 'HTML' });
+  }
+
+  if (data.startsWith('use_manual_abi:')) {
+    const abiName = state.getLong(data.split(':')[1]);
+    const { getUserState, clearUserState } = require('./utils');
+    const stateData = getUserState(chatId);
+    if (!stateData || !stateData.target) return bot.sendMessage(chatId, "❌ Session expired. Please try again.");
+    
+    const { target, mode } = stateData;
+    state.getSession().deployed[abiName] = target;
+    state.saveState();
+    clearUserState(chatId);
+    
+    const nextAction = mode === 'get' ? 'get_methods' : 'int_methods';
+    return handleAction(bot, { message: query.message, data: `${nextAction}:${state.getShort(abiName)}`, from: query.from });
+  }
+
   if (data === 'files_list') {
-    const files = fs.readdirSync(state.getSessionPath()).filter(f => f.endsWith('.tact'));
-    return sendOrEdit(`📁 *Project Files:* (Total: ${files.length})`, {
+    const files = getAllSourceFiles(state.getSessionPath());
+    // Limit to 50 files for UI stability
+    const displayedFiles = files.slice(0, 50);
+    return sendOrEdit(`📁 *Project Files:* (Total: ${files.length}${files.length > 50 ? ', showing first 50' : ''})`, {
       reply_markup: { 
         inline_keyboard: [
-          ...files.map(f => [{ text: `📄 ${f}`, callback_data: `view_file:${state.getShort(f)}` }]),
+          ...displayedFiles.map(f => [{ text: `📄 ${f}`, callback_data: `view_file:${state.getShort(f)}` }]),
           [{ text: '⬅️ Back', callback_data: 'menu' }]
         ] 
       },
@@ -255,56 +341,82 @@ async function handleAction(bot, query) {
     });
   }
 
+  if (data.startsWith('view_file:')) {
+    const fileName = state.getLong(data.split(':')[1]);
+    const sessionPath = state.getSessionPath();
+    const filePath = path.join(sessionPath, fileName);
+    
+    if (!fs.existsSync(filePath)) return bot.sendMessage(chatId, `❌ File ${tonUtils.escapeHTML(fileName)} not found.`);
+    
+    const content = fs.readFileSync(filePath, 'utf8');
+    const escapedContent = tonUtils.escapeHTML(content.slice(0, 3000));
+    const msgText = `📄 <b>File:</b> <code>${tonUtils.escapeHTML(fileName)}</code>\n\n<pre>${escapedContent}</pre>${content.length > 3000 ? '\n\n<i>(Truncated...)</i>' : ''}`;
+    
+    return sendOrEdit(msgText, {
+      reply_markup: {
+        inline_keyboard: [
+          [{ text: '🔨 Compile This', callback_data: `do_compile:${state.getShort(fileName)}` }],
+          [{ text: '⬅️ Back to Files', callback_data: 'files_list' }]
+        ]
+      },
+      parse_mode: 'HTML'
+    });
+  }
+
   if (data.startsWith('do_compile:')) {
     const fileName = state.getLong(data.split(':')[1]);
-    bot.sendMessage(chatId, `🔨 <b>Compiling ${fileName}...</b>`, { parse_mode: 'HTML' });
+    bot.sendMessage(chatId, `🔨 <b>Compiling ${tonUtils.escapeHTML(fileName)}...</b>`, { parse_mode: 'HTML' });
     compiler.queueCompileTask(async () => {
         const sessionPath = state.getSessionPath();
         const buildDir = state.getSessionBuildDir();
-        
-        fs.writeFileSync(path.join(sessionPath, 'contract.tact'), fs.readFileSync(path.join(sessionPath, fileName))); 
-        state.getSession().lastFile = fileName; state.saveState();
-        
         const t0 = Date.now();
-        const tempConfigPath = path.join(sessionPath, `temp_${fileName}.json`);
-        const projectName = `Target_${fileName.replace('.tact', '')}`;
-        const tempConfig = {
-            projects: [{
-                name: projectName,
-                path: `./${fileName}`,
-                output: './build',
-                options: { debug: true, external: true }
-            }]
-        };
-        fs.writeFileSync(tempConfigPath, JSON.stringify(tempConfig));
+        
+        state.getSession().lastFile = fileName; state.saveState();
 
-        try {
-            const out = fs.readFileSync(path.join(sessionPath, fileName)); // just to check file exists
-            require('child_process').execSync(`npx tact --config temp_${fileName}.json 2>&1`, { cwd: sessionPath, stdio: 'pipe', timeout: 60000 });
-            const dur = Date.now() - t0;
-            const artifacts = fs.existsSync(buildDir) ? fs.readdirSync(buildDir).filter(f => f.startsWith(projectName)) : [];
-            
-            logger.info(`Bot compile OK: ${fileName} (${dur}ms)`);
-            const firstContract = artifacts.find(a => a.endsWith('.code.boc'));
+        const result = await compiler.compile(fileName, sessionPath);
+        const dur = Date.now() - t0;
+
+        if (result.success) {
+            logger.info(`Bot compile (${result.language}) OK: ${fileName} (${dur}ms)`);
             const reply_markup = { inline_keyboard: [] };
-            if (firstContract) {
-                const cName = firstContract.replace('.code.boc', '');
-                reply_markup.inline_keyboard.push([{ text: `🚀 Deploy ${cName} Now`, callback_data: `prep_manual_deploy:${state.getShort(cName)}` }]);
+            
+            if (result.baseName) {
+                reply_markup.inline_keyboard.push([{ text: `🚀 Deploy ${result.baseName} Now`, callback_data: `prep_manual_deploy:${state.getShort(result.baseName)}` }]);
+            } else if (result.artifacts && result.artifacts.length > 0) {
+                const firstContract = result.artifacts.find(a => a.endsWith('.code.boc'));
+                if (firstContract) {
+                    const cName = firstContract.replace('.code.boc', '');
+                    reply_markup.inline_keyboard.push([{ text: `🚀 Deploy ${cName} Now`, callback_data: `prep_manual_deploy:${state.getShort(cName)}` }]);
+                }
             }
+            
             reply_markup.inline_keyboard.push([{ text: '⬅️ Back to Menu', callback_data: 'menu' }]);
 
-            bot.sendMessage(chatId, `✅ <b>Compiled ${fileName} in ${dur}ms</b>\n\n<b>Artifacts:</b> ${artifacts.map(a => `<code>${a.replace('.code.boc','')}</code>`).join(', ')}`, { 
+            let artifactsText = '';
+            if (result.artifacts) {
+                artifactsText = `\n\n<b>Artifacts:</b> ${result.artifacts.map(a => `<code>${tonUtils.escapeHTML(a.replace('.code.boc',''))}</code>`).join(', ')}`;
+            } else if (result.baseName) {
+                artifactsText = `\n\n<b>Artifacts:</b> <code>${tonUtils.escapeHTML(result.baseName)}</code>`;
+            }
+
+            bot.sendMessage(chatId, `✅ <b>Compiled ${result.language} ${tonUtils.escapeHTML(fileName)} in ${dur}ms</b>${artifactsText}`, { 
                 parse_mode: 'HTML',
                 reply_markup
             });
-        } finally {
-            if (fs.existsSync(tempConfigPath)) fs.unlinkSync(tempConfigPath);
+        } else {
+            throw new Error(result.error || 'Compilation failed');
         }
     }).catch((e) => {
         const err = e.stdout ? e.stdout.toString('utf8') : e.message;
+        const ext = path.extname(fileName).toLowerCase();
+        let parsedErr = err;
+        
+        if (ext === '.fc' || ext === '.func') parsedErr = compiler.parseFuncError(err);
+        else if (ext === '.tolk') parsedErr = compiler.parseTolkError(err);
+        else if (ext === '.tact') parsedErr = compiler.parseTactError(err);
+
         logger.error(`Bot compile FAIL: ${fileName}`, '', e);
-        logger.error(`Bot compile output:\n${err}`);
-        bot.sendMessage(chatId, `❌ <b>Compilation Failed</b>\n\n<pre>${tonUtils.escapeHTML(err.slice(0, 3000))}</pre>`, { parse_mode: 'HTML' });
+        bot.sendMessage(chatId, parsedErr, { parse_mode: 'HTML' });
     });
   }
 
@@ -319,18 +431,20 @@ async function handleAction(bot, query) {
           if (match) abiPath = path.join(buildDir, match);
       }
       
-      if (!fs.existsSync(abiPath)) return bot.sendMessage(chatId, `❌ ABI not found for ${name}. Try compiling first.`);
+      if (!fs.existsSync(abiPath)) return bot.sendMessage(chatId, `❌ ABI not found for ${tonUtils.escapeHTML(name)}. Try compiling first.`);
       
       const abi = JSON.parse(fs.readFileSync(abiPath, 'utf8'));
       const buttons = [];
       (abi.receivers || []).forEach(r => {
           if (r.receiver === 'internal') {
-              const label = r.message.type === 'text' ? `✉️ "${r.message.text}"` : `✉️ ${r.message.type}`;
-              buttons.push([{ text: label, callback_data: `prep_int:${state.getShort(name)}:${state.getShort(r.message.type)}:${state.getShort(r.message.text || '')}` }]);
+              const m = r.message;
+              const type = m.kind === 'typed' ? m.type : (m.kind === 'text' ? 'text' : m.kind);
+              const label = m.kind === 'text' ? `✉️ "${m.text}"` : `✉️ ${m.type || m.kind}`;
+              buttons.push([{ text: label, callback_data: `prep_int:${state.getShort(name)}:${state.getShort(type)}:${state.getShort(m.text || '')}` }]);
           }
       });
       
-      return sendOrEdit(`🎮 <b>Interact with ${name}</b>\nSelect a message type to send:`, {
+      return sendOrEdit(`🎮 <b>Interact with ${tonUtils.escapeHTML(name)}</b>\nSelect a message type to send:`, {
           reply_markup: { inline_keyboard: [...buttons, [{ text: '⬅️ Back', callback_data: 'interact_menu' }]] },
           parse_mode: 'HTML'
       });
@@ -347,7 +461,7 @@ async function handleAction(bot, query) {
           if (match) abiPath = path.join(buildDir, match);
       }
       
-      if (!fs.existsSync(abiPath)) return bot.sendMessage(chatId, `❌ ABI not found for ${name}.`);
+      if (!fs.existsSync(abiPath)) return bot.sendMessage(chatId, `❌ ABI not found for ${tonUtils.escapeHTML(name)}.`);
       
       const abi = JSON.parse(fs.readFileSync(abiPath, 'utf8'));
       const buttons = [];
@@ -355,7 +469,7 @@ async function handleAction(bot, query) {
           buttons.push([{ text: `🔍 ${g.name}()`, callback_data: `call_get:${state.getShort(name)}:${state.getShort(g.name)}` }]);
       });
       
-      return sendOrEdit(`🔍 <b>Getters for ${name}</b>\nSelect a method to call:`, {
+      return sendOrEdit(`🔍 <b>Getters for ${tonUtils.escapeHTML(name)}</b>\nSelect a method to call:`, {
           reply_markup: { inline_keyboard: [...buttons, [{ text: '⬅️ Back', callback_data: 'getters_menu' }]] },
           parse_mode: 'HTML'
       });
@@ -398,8 +512,12 @@ async function handleAction(bot, query) {
           }
           
           setUserState(chatId, { action: 'awaiting_args', cName, type, target, fields: typeDef.fields, currentField: 0, args: {} });
-          return bot.sendMessage(chatId, `⌨️ <b>Enter arguments for ${type}:</b>\n\nField: <code>${typeDef.fields[0].name}</code> (${typeDef.fields[0].type.type})`, { parse_mode: 'HTML' });
+          return bot.sendMessage(chatId, `⌨️ <b>Enter arguments for ${tonUtils.escapeHTML(type)}:</b>\n\nField: <code>${tonUtils.escapeHTML(typeDef.fields[0].name)}</code> (${tonUtils.escapeHTML(typeDef.fields[0].type.type)})`, { parse_mode: 'HTML' });
       }
+      
+      const { handleSendMessage } = require('./ton-actions');
+      bot.sendMessage(chatId, `🚀 <b>Sending ${tonUtils.escapeHTML(type)} to ${tonUtils.escapeHTML(cName)}...</b>`, { parse_mode: 'HTML' });
+      await handleSendMessage(bot, chatId, target, type, cName, {});
   }
 
   if (data.startsWith('call_get:')) {
@@ -416,13 +534,13 @@ async function handleAction(bot, query) {
           if (match) abiPath = path.join(buildDir, match);
       }
       
-      if (!fs.existsSync(abiPath)) return bot.sendMessage(chatId, `❌ ABI not found for ${cName}.`);
+      if (!fs.existsSync(abiPath)) return bot.sendMessage(chatId, `❌ ABI not found for ${tonUtils.escapeHTML(cName)}.`);
       const abi = JSON.parse(fs.readFileSync(abiPath, 'utf8'));
       const getter = abi.getters.find(g => g.name === method);
-      
+
       if (getter.arguments && getter.arguments.length > 0) {
           setUserState(chatId, { action: 'awaiting_get_args', cName, method, target, fields: getter.arguments, currentField: 0, args: [] });
-          return bot.sendMessage(chatId, `⌨️ <b>Enter arguments for ${method}():</b>\n\nField: <code>${getter.arguments[0].name}</code>`, { parse_mode: 'HTML' });
+          return bot.sendMessage(chatId, `⌨️ <b>Enter arguments for ${tonUtils.escapeHTML(method)}():</b>\n\nField: <code>${tonUtils.escapeHTML(getter.arguments[0].name)}</code>`, { parse_mode: 'HTML' });
       }
       
       const { handleCallGetter } = require('./ton-actions');
@@ -442,7 +560,39 @@ async function handleAction(bot, query) {
 
   if (data.startsWith('prep_manual_deploy:')) {
     const name = state.getLong(data.split(':')[1]);
-    return bot.sendMessage(chatId, `🚀 <b>Ready to deploy ${name}?</b>\n\nThis will use 0.05 TON to deploy the contract on ${config.NETWORK.toUpperCase()}.`, {
+    const buildDir = state.getSessionBuildDir();
+    const { abiPath, pkgPath, dataPath } = getArtifactPaths(buildDir, name);
+    
+    // Check if we need arguments from ABI or PKG
+    let initDef = null;
+    let abi = null;
+
+    if (fs.existsSync(pkgPath)) {
+        const pkg = JSON.parse(fs.readFileSync(pkgPath, 'utf8'));
+        abi = typeof pkg.abi === 'string' ? JSON.parse(pkg.abi) : pkg.abi;
+        initDef = pkg.init;
+    } else if (fs.existsSync(abiPath)) {
+        abi = JSON.parse(fs.readFileSync(abiPath, 'utf8'));
+        initDef = abi.init;
+    }
+
+    if (initDef && !fs.existsSync(dataPath)) {
+        const fields = initDef.args || initDef.arguments;
+        if (fields && fields.length > 0) {
+            const { setUserState } = require('./utils');
+            setUserState(chatId, {
+                action: 'awaiting_deploy_args',
+                name,
+                fields: fields,
+                currentField: 0,
+                args: {},
+                abi
+            });
+            return bot.sendMessage(chatId, `🚀 <b>Deploying ${tonUtils.escapeHTML(name)}</b>\n\nThis contract requires initialization arguments.\n\n⌨️ <b>Enter value for ${tonUtils.escapeHTML(fields[0].name)}:</b> (${tonUtils.escapeHTML(fields[0].type.type)})`, { parse_mode: 'HTML' });
+        }
+    }
+
+    return bot.sendMessage(chatId, `🚀 <b>Ready to deploy ${tonUtils.escapeHTML(name)}?</b>\n\nThis will use 0.05 TON to deploy the contract on ${config.NETWORK.toUpperCase()}.`, {
       parse_mode: 'HTML',
       reply_markup: {
         inline_keyboard: [
@@ -461,37 +611,48 @@ async function handleAction(bot, query) {
 
 async function handleDoDeploy(bot, chatId, name, args = {}) {
     logger.info(`Bot requested deploy: ${name}`);
-    bot.sendMessage(chatId, `🚀 <b>Deploying ${name}...</b>`, { parse_mode: 'HTML' });
+    bot.sendMessage(chatId, `🚀 <b>Deploying ${tonUtils.escapeHTML(name)}...</b>`, { parse_mode: 'HTML' });
     try {
         const buildDir = state.getSessionBuildDir();
-        let baseName = name;
-        let codePath = path.join(buildDir, `${baseName}.code.boc`);
-        let abiPath = path.join(buildDir, `${baseName}.abi`);
-        let dataPath = path.join(buildDir, `${baseName}.data.boc`);
-        
-        if (!fs.existsSync(codePath)) {
-            const files = fs.readdirSync(buildDir);
-            const match = files.find(f => f.endsWith(`_${name}.code.boc`) || f === `${name}.code.boc`);
-            if (match) {
-                baseName = match.replace('.code.boc', '');
-                codePath = path.join(buildDir, `${baseName}.code.boc`);
-                abiPath = path.join(buildDir, `${baseName}.abi`);
-                dataPath = path.join(buildDir, `${baseName}.data.boc`);
-            }
-        }
+        const { baseName, codePath, abiPath, pkgPath, dataPath } = getArtifactPaths(buildDir, name);
 
         if (!fs.existsSync(codePath)) throw new Error(`Artifacts for "${baseName}" not found. Compile first.`);
         
         const codeCell = Cell.fromBoc(fs.readFileSync(codePath))[0];
         
         let dataCell;
-        if (fs.existsSync(abiPath) && Object.keys(args).length > 0) {
-            const abi = JSON.parse(fs.readFileSync(abiPath, 'utf8'));
-            const initDef = abi.init;
-            if (initDef && initDef.arguments) {
-                const builder = beginCell();
-                initDef.arguments.forEach(f => tonUtils.packField(builder, f, args[f.name], abi));
-                dataCell = builder.endCell();
+        let initDef = null;
+        let abi = null;
+
+        if (fs.existsSync(pkgPath)) {
+            const pkg = JSON.parse(fs.readFileSync(pkgPath, 'utf8'));
+            abi = typeof pkg.abi === 'string' ? JSON.parse(pkg.abi) : pkg.abi;
+            initDef = pkg.init;
+        } else if (fs.existsSync(abiPath)) {
+            abi = JSON.parse(fs.readFileSync(abiPath, 'utf8'));
+            initDef = abi.init;
+        }
+
+        if (initDef) {
+            const fields = initDef.args || initDef.arguments;
+            if (fields && fields.length > 0) {
+                // If we have arguments in ABI but args object is empty/incomplete, check if we can skip
+                const missing = fields.filter(f => args[f.name] === undefined);
+                if (missing.length > 0 && !fs.existsSync(dataPath)) {
+                    throw new Error(`Missing required initialization arguments: ${missing.map(m => m.name).join(', ')}. Quick deploy only supports contracts with zero-argument init() or those with a pre-compiled data.boc.`);
+                }
+                
+                if (Object.keys(args).length > 0) {
+                    const builder = beginCell();
+                    if (initDef.prefix) {
+                        builder.storeUint(initDef.prefix.value, initDef.prefix.bits);
+                    }
+                    fields.forEach(f => tonUtils.packField(builder, f, args[f.name], abi));
+                    dataCell = builder.endCell();
+                }
+            } else if (initDef.prefix && !fs.existsSync(dataPath)) {
+                // Handle zero-arg init with prefix
+                dataCell = beginCell().storeUint(initDef.prefix.value, initDef.prefix.bits).endCell();
             }
         }
         
@@ -519,9 +680,9 @@ async function handleDoDeploy(bot, chatId, name, args = {}) {
 
         const addrStr = address.toString({ testOnly: config.IS_TESTNET });
         state.getSession().deployed[name] = addrStr; state.saveState();
-        bot.sendMessage(chatId, `🎉 <b>Contract Deployed!</b>\n\n<b>Address:</b> <code>${addrStr}</code>`, { parse_mode: 'HTML' });
+        bot.sendMessage(chatId, `🎉 <b>Contract Deployed!</b>\n\n<b>Address:</b> <code>${tonUtils.escapeHTML(addrStr)}</code>`, { parse_mode: 'HTML' });
     } catch (e) {
-        bot.sendMessage(chatId, "❌ <b>Deployment Failed</b>\n\n" + e.message);
+        bot.sendMessage(chatId, `❌ <b>Deployment Failed</b>\n\n${tonUtils.escapeHTML(e.message)}`, { parse_mode: 'HTML' });
     }
 }
 

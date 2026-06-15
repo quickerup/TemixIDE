@@ -5,8 +5,8 @@ module.exports = {
   PORT: parseInt(process.env.TACT_PORT || '3000', 10),
   BOT_TOKEN: process.env.TELEGRAM_BOT_TOKEN,
   CHANNEL_ID: process.env.TELEGRAM_CHANNEL_ID ? String(process.env.TELEGRAM_CHANNEL_ID).trim() : '',
-  DEEPSEEK_API_KEY: process.env.DEEPSEEK_API_KEY,
-  DEEPSEEK_MODEL: 'deepseek-reasoner',
+  FEE_COLLECTOR_ADDRESS: process.env.FEE_COLLECTOR_ADDRESS || 'UQD_K5_CunSUpL4p_N_v5U-Xn9Z_Mv_2_j_B_D_C_F_E_F_G', // Placeholder
+  DEPLOY_FEE_MAINNET: 0.5,
   TONCENTER_API_KEY: process.env.TONCENTER_API_KEY || "1dce291cfe6b56e6d28f52cec84c72b942da3723cc9a4bfe6b224b1c8f7efb62",
   ENV: process.env.TACT_ENV || 'development',
   DEBUG: process.env.DEBUG === 'true' || (process.env.TACT_ENV || 'development') === 'development',

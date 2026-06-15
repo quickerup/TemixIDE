@@ -33,6 +33,81 @@ function initBot() {
   // Initialize Handlers
   setupHandlers(bot);
 
+  // Initialize Inline Query Support
+  bot.on('inline_query', async (query) => {
+    const authorized = config.AUTHORIZED_USERS.length === 0 || config.AUTHORIZED_USERS.includes(String(query.from.id));
+    if (!authorized) return bot.answerInlineQuery(query.id, []);
+
+    const text = query.query.trim();
+    if (!text) return bot.answerInlineQuery(query.id, []);
+
+    // Smart split regex
+    const parts = [];
+    const regex = /[^\s"]+|"([^"]*)"/gi;
+    let match;
+    while ((match = regex.exec(text)) !== null) {
+        parts.push(match[1] ? match[1] : match[0]);
+    }
+
+    const cmd = parts[0].toLowerCase(); // get or call
+    const cName = parts[1];
+    const methodOrMsg = parts[2];
+    const args = parts.slice(3);
+
+    const results = [];
+    
+    // Resolve session for this specific user
+    // Note: Inline queries don't have a chatId, but they have a user.id
+    // Our state service is currently global, but it uses chatId. 
+    // In this bot, chatId and userId are often the same for private chats.
+    const target = state.state.deployed ? state.state.deployed[cName] : null;
+
+    if (cmd === 'get' && cName && methodOrMsg && target) {
+        results.push({
+            type: 'article',
+            id: 'get_' + Date.now(),
+            title: `🔍 Get ${cName}.${methodOrMsg}()`,
+            description: `Run getter on ${target.slice(0, 10)}...`,
+            input_message_content: {
+                message_text: `🔍 <b>Executing Getter</b>\nContract: <code>${cName}</code>\nMethod: <code>${methodOrMsg}</code>\nArgs: <code>${args.join(' ') || 'none'}</code>`,
+                parse_mode: 'HTML'
+            },
+            reply_markup: {
+                inline_keyboard: [[{ text: '▶️ Run Now', callback_data: `inline_get:${state.getShort(cName)}:${state.getShort(methodOrMsg)}:${state.getShort(args.join(','))}` }]]
+            }
+        });
+    } else if (cmd === 'call' && cName && methodOrMsg && target) {
+        results.push({
+            type: 'article',
+            id: 'call_' + Date.now(),
+            title: `🚀 Call ${cName}.${methodOrMsg}`,
+            description: `Send message to ${target.slice(0, 10)}...`,
+            input_message_content: {
+                message_text: `🚀 <b>Preparing Transaction</b>\nContract: <code>${cName}</code>\nMessage: <code>${methodOrMsg}</code>\nArgs: <code>${args.join(' ') || 'none'}</code>`,
+                parse_mode: 'HTML'
+            },
+            reply_markup: {
+                inline_keyboard: [[{ text: '✍️ Sign & Send', callback_data: `inline_call:${state.getShort(cName)}:${state.getShort(methodOrMsg)}:${state.getShort(args.join(','))}` }]]
+            }
+        });
+    }
+ else {
+        // Show help/status
+        results.push({
+            type: 'article',
+            id: 'help',
+            title: '⚡ TemixIDE Power Commands',
+            description: 'Usage: get [Contract] [Method] | call [Contract] [Msg]',
+            input_message_content: {
+                message_text: `<b>TemixIDE Inline Help</b>\n\nUsage:\n<code>@bot get [Contract] [Method] [Args]</code>\n<code>@bot call [Contract] [Message] [Args]</code>`,
+                parse_mode: 'HTML'
+            }
+        });
+    }
+
+    bot.answerInlineQuery(query.id, results, { cache_time: 0, is_personal: true }).catch(e => logger.error('Inline Query Answer Error', '', e));
+  });
+
   // Initialize Callback Actions
   bot.on('callback_query', async (query) => {
       const authorized = config.AUTHORIZED_USERS.length === 0 || config.AUTHORIZED_USERS.includes(String(query.from.id));

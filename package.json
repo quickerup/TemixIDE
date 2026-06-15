@@ -17,8 +17,10 @@
   "dependencies": {
     "@orbs-network/ton-access": "^2.3.3",
     "@tact-lang/compiler": "^1.6.13",
+    "@ton-community/func-js": "^0.11.0",
     "@ton/core": "^0.63.1",
     "@ton/crypto": "^3.3.0",
+    "@ton/tolk-js": "^1.4.1",
     "@ton/ton": "^16.2.4",
     "compression": "^1.8.1",
     "cors": "^2.8.6",
@@ -31,6 +33,10 @@
     "node-telegram-bot-api": "^0.67.0",
     "typescript": "^6.0.3",
     "uuid": "^14.0.0",
-    "ws": "^8.20.0"
+    "ws": "^8.20.0",
+    "zip": "^1.2.0"
+  },
+  "allowScripts": {
+    "protobufjs@6.11.5": true
   }
 }

@@ -26,7 +26,17 @@ A professional-grade TON smart contract IDE for the Tact language.
 | 🚀 Deploy | Select compiled artifact and deploy to network |
 | 🔍 Getters | Interactive list of read-only methods for deployed contracts |
 | 📁 Files | View workspace contents and upload new `.tact` files |
+| 📝 Paste Code | Quick-add contract code by pasting it into the chat |
 | 📋 History | View recent server-side transactions |
+| ⚡ Commands | Direct interaction via `/get` and `/call` |
+
+## Power User Commands
+| Command | Description |
+|---------|-------------|
+| `/get [Contract] [Method] [Args...]` | Call a read-only getter method |
+| `/call [Contract] [Message] [Args...]` | Send a typed internal message (transaction) |
+| `/call [Contract] "[Text]"` | Send a simple text comment message |
+| `/cancel` | Abort current interactive operation |
 
 ## Environment Variables
 | Variable | Default | Description |

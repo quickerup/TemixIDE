@@ -1,15 +1,16 @@
-const { TonClient, Address, Cell } = require('@ton/ton');
+const { TonClient } = require('@ton/ton');
+const { Address, Cell, toNano, beginCell } = require('@ton/core');
 const { getHttpEndpoint } = require('@orbs-network/ton-access');
 const config = require('../config');
 const logger = require('./logger');
 
-async function getEndpoint() {
-  const isTestnet = config.NETWORK === 'testnet';
+async function getEndpoint(network) {
+  const isTestnet = (network || config.NETWORK) === 'testnet';
   const toncenter = isTestnet ? 'https://testnet.toncenter.com/api/v2/jsonRPC' : 'https://toncenter.com/api/v2/jsonRPC';
   
   const providers = [
     () => toncenter,
-    async () => await getHttpEndpoint({ network: config.NETWORK }),
+    async () => await getHttpEndpoint({ network: network || config.NETWORK }),
   ];
   
   for (let i = 0; i < providers.length; i++) {
@@ -65,8 +66,8 @@ async function withRetry(fn, retries = 10, id = '') {
   throw lastErr;
 }
 
-function decodeStackItem(item, typeName) {
-  if (!item) return null;
+function decodeStackItem(item, typeName, abi) {
+  if (!item || item.type === 'null') return null;
   if (item.type === 'int') {
     const val = item.value;
     return (val <= BigInt(Number.MAX_SAFE_INTEGER) && val >= BigInt(Number.MIN_SAFE_INTEGER)) 
@@ -74,21 +75,38 @@ function decodeStackItem(item, typeName) {
       : val.toString();
   }
   if (item.type === 'cell') {
-    if (typeName === 'string') {
-      try { return item.cell.beginParse().loadStringTail(); } catch (e) { return '[Invalid String Cell]'; }
+    if (typeName === 'address') {
+      try { return item.cell.beginParse().loadAddress().toString({ testOnly: config.IS_TESTNET }); } catch (e) { return `[Invalid Address Cell: ${item.cell.hash().toString('hex').slice(0, 8)}...]`; }
     }
-    return '[Cell]';
+    if (typeName === 'string') {
+      try { return item.cell.beginParse().loadStringTail(); } catch (e) { return `[Invalid String Cell: ${item.cell.hash().toString('hex').slice(0, 8)}...]`; }
+    }
+    return `[Cell: ${item.cell.hash().toString('hex').slice(0, 8)}...]`;
   }
   if (item.type === 'slice') {
     if (typeName === 'address') {
-      try { return item.cell.beginParse().loadAddress().toString({ testOnly: config.IS_TESTNET }); } catch (e) { return '[Invalid Address Slice]'; }
+      try { return item.cell.beginParse().loadAddress().toString({ testOnly: config.IS_TESTNET }); } catch (e) { return `[Invalid Address Slice: ${item.cell.hash().toString('hex').slice(0, 8)}...]`; }
     }
     if (typeName === 'string') {
-        try { return item.cell.beginParse().loadStringTail(); } catch (e) { return '[Invalid String Slice]'; }
+        try { return item.cell.beginParse().loadStringTail(); } catch (e) { return `[Invalid String Slice: ${item.cell.hash().toString('hex').slice(0, 8)}...]`; }
     }
-    return '[Slice]';
+    return `[Slice: ${item.cell.hash().toString('hex').slice(0, 8)}...]`;
   }
-  return item.value;
+  if (item.type === 'tuple') {
+    const items = item.items;
+    const structDef = abi && abi.types ? abi.types.find(t => t.name === typeName) : null;
+    if (structDef) {
+        const res = {};
+        structDef.fields.forEach((f, idx) => {
+            if (items[idx]) {
+                res[f.name] = decodeStackItem(items[idx], f.type.type, abi);
+            }
+        });
+        return res;
+    }
+    return items.map(i => decodeStackItem(i, null, abi));
+  }
+  return item.value !== undefined ? item.value : item;
 }
 
 function packField(builder, field, value, abi) {
@@ -118,14 +136,23 @@ function packField(builder, field, value, abi) {
         if (value === undefined || value === null || value === '') {
           throw new Error(`Value for field "${field.name}" is required`);
         }
+        
+        let finalVal = value;
+        if (typeof value === 'string') {
+            const tonMatch = value.match(/^ton\((.*?)\)$/i);
+            if (tonMatch) {
+                finalVal = toNano(tonMatch[1]);
+            }
+        }
+
         const bits = typeof format === 'number' ? format : (format === 'coins' ? 124 : 257);
         if (format === 'coins') {
-          logger.trace(`Storing coins: ${value}`);
-          builder.storeCoins(BigInt(value));
+          logger.trace(`Storing coins: ${finalVal}`);
+          builder.storeCoins(BigInt(finalVal));
         } else {
-          logger.trace(`Storing ${typeName} (${bits} bits): ${value}`);
-          if (typeName === 'uint') builder.storeUint(BigInt(value), bits);
-          else builder.storeInt(BigInt(value), bits);
+          logger.trace(`Storing ${typeName} (${bits} bits): ${finalVal}`);
+          if (typeName === 'uint') builder.storeUint(BigInt(finalVal), bits);
+          else builder.storeInt(BigInt(finalVal), bits);
         }
         break;
       }
@@ -171,20 +198,37 @@ function packField(builder, field, value, abi) {
       }
       case 'slice':
       case 'cell': {
-        if (!value) {
+        if (!value || value === 'empty' || value === '0') {
           if (typeName === 'cell') {
               logger.trace(`Empty cell for ${field.name}, storing empty cell ref`);
               builder.storeRef(Cell.EMPTY);
+          } else {
+              // For slice, an empty cell slice
+              builder.storeSlice(Cell.EMPTY.beginParse());
           }
-          else throw new Error(`Value for field "${field.name}" (slice) is required`);
         } else {
           try {
-            const cell = Cell.fromBoc(Buffer.from(value, 'hex'))[0];
-            logger.trace(`Storing ${typeName} from BOC: ${value.slice(0, 64)}...`);
+            let cell;
+            const hex = String(value).startsWith('0x') ? value.slice(2) : value;
+            try {
+              // Try as BOC first
+              cell = Cell.fromBoc(Buffer.from(hex, 'hex'))[0];
+            } catch (e) {
+              // If not a valid BOC, check if it is a valid hex string
+              if (/^[0-9a-fA-F]*$/.test(hex)) {
+                cell = beginCell().storeBuffer(Buffer.from(hex, 'hex')).endCell();
+                logger.trace(`Value for ${field.name} is a hex string, stored in cell`);
+              } else {
+                // Not a hex string, treat as plain text string
+                cell = beginCell().storeStringTail(String(value)).endCell();
+                logger.trace(`Value for ${field.name} is not hex, stored as string tail in cell`);
+              }
+            }
+            
             if (typeName === 'cell') builder.storeRef(cell);
             else builder.storeSlice(cell.beginParse());
           } catch (e) {
-            throw new Error(`Invalid hex/BOC for "${field.name}": ${e.message}`);
+            throw new Error(`Invalid hex data for "${field.name}": ${e.message}`);
           }
         }
         break;

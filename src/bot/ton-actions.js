@@ -10,20 +10,31 @@ const { escapeMarkdownV2 } = require('./utils');
 
 async function handleSendMessage(bot, chatId, target, type, contractName, args) {
     logger.info(`Bot interaction (handleSendMessage): ${type} for ${contractName} to ${target}`);
-    const buildDir = state.getSessionBuildDir();
-    const abiPath = path.join(buildDir, `${contractName}.abi`);
-    if (!fs.existsSync(abiPath)) throw new Error(`ABI not found for ${contractName}`);
     
-    const abi = JSON.parse(fs.readFileSync(abiPath, 'utf8'));
-    const typeDef = abi.types.find(t => t.name === type);
-    if (!typeDef) throw new Error(`Message type "${type}" not found in ABI`);
+    let body;
+    if (type === 'text') {
+        const text = args.text || '';
+        bot.sendMessage(chatId, `🚀 Sending text message "${text}" to \`${contractName}\`...`, { parse_mode: 'Markdown' });
+        body = beginCell().storeUint(0, 32).storeStringTail(text).endCell();
+    } else {
+        const buildDir = state.getSessionBuildDir();
+        const abiPath = path.join(buildDir, `${contractName}.abi`);
+        if (!fs.existsSync(abiPath)) throw new Error(`ABI not found for ${contractName}`);
+        
+        const abi = JSON.parse(fs.readFileSync(abiPath, 'utf8'));
+        const typeDef = abi.types.find(t => t.name === type);
+        if (!typeDef) throw new Error(`Message type "${type}" not found in ABI`);
 
-    bot.sendMessage(chatId, `🚀 Sending \`${type}\` to \`${contractName}\`...`, { parse_mode: 'Markdown' });
-    
-    const builder = beginCell();
-    if (typeDef.header !== null) builder.storeUint(typeDef.header, 32);
-    typeDef.fields.forEach(f => tonUtils.packField(builder, f, args[f.name], abi));
-    const body = builder.endCell();
+        bot.sendMessage(chatId, `🚀 Sending \`${type}\` to \`${contractName}\`...`, { parse_mode: 'Markdown' });
+        
+        const builder = beginCell();
+        if (typeDef.header !== null) builder.storeUint(typeDef.header, 32);
+        typeDef.fields.forEach((f, idx) => {
+            const val = args[f.name] !== undefined ? args[f.name] : args[idx];
+            tonUtils.packField(builder, f, val, abi);
+        });
+        body = builder.endCell();
+    }
 
     const seqno = await tonUtils.withRetry(async () => {
         const endpoint = await tonUtils.getEndpoint();
@@ -35,7 +46,7 @@ async function handleSendMessage(bot, chatId, target, type, contractName, args) 
         let s = 0; try { s = await contract.getSeqno(); } catch (e) { s = 0; }
         await contract.sendTransfer({
             seqno: s, secretKey: ton.getWalletKey().secretKey,
-            messages: [internal({ to: Address.parseFriendly(target).address, value: '0.05', bounce: true, body })]
+            messages: [internal({ to: Address.parseFriendly(target).address, value: '0.2', bounce: true, body })]
         });
         return s;
     });
@@ -81,10 +92,31 @@ async function handleCallGetter(bot, chatId, target, method, contractName, args)
             return bot.sendMessage(chatId, msg, { parse_mode: 'Markdown' });
         }
 
-        const returnType = getterDef.returnType ? getterDef.returnType.type : null;
-        const resultStack = result.stack.items.map(i => tonUtils.decodeStackItem(i, returnType));
+        const returnType = getterDef ? (getterDef.returnType ? getterDef.returnType.type : null) : null;
         
-        bot.sendMessage(chatId, `📊 *Result:* \`${contractName}.${method}()\`\n\n\`\`\`json\n${JSON.stringify(resultStack, null, 2)}\n\`\`\``, { parse_mode: 'Markdown' });
+        // Smart stack filtering:
+        // Some RPCs return a "dirty" stack with many leading Cells representing internal VM state.
+        // If we have many items and they are mostly Cells followed by something else, we take only the relevant part.
+        // Standard Tact/modern getters usually return exactly 1 item (which can be a Tuple).
+        let itemsToDecode = result.stack.items;
+        if (itemsToDecode.length > 1) {
+            const lastItem = itemsToDecode[itemsToDecode.length - 1];
+            const allOthersAreCells = itemsToDecode.slice(0, -1).every(i => i.type === 'cell');
+            
+            if (allOthersAreCells) {
+                // Highly likely a dirty stack, take only the last item
+                itemsToDecode = [lastItem];
+            } else {
+                // If it doesn't look like a simple dirty stack, we might have a multi-value return.
+                // We keep the whole stack but maybe we should still be careful.
+                // For now, let's trust the stack if it's not obviously junk.
+            }
+        }
+        
+        const resultStack = itemsToDecode.map(i => tonUtils.decodeStackItem(i, returnType, abi));
+
+        const finalOutput = resultStack.length === 1 ? resultStack[0] : resultStack;
+        bot.sendMessage(chatId, `📊 *Result:* \`${contractName}.${method}()\`\n\n\`\`\`json\n${JSON.stringify(finalOutput, null, 2)}\n\`\`\``, { parse_mode: 'Markdown' });
     } catch (e) {
         bot.sendMessage(chatId, `❌ *Call Failed:* ${e.message}`);
     }

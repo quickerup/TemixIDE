@@ -1,0 +1,42 @@
+name: TemixIDE Serverless Bot
+
+on:
+  repository_dispatch:
+    types: [telegram_update]
+  workflow_dispatch:
+    inputs:
+      payload:
+        description: 'Telegram Update JSON'
+        required: true
+
+jobs:
+  process_bot:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GH_TOKEN }}
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '18'
+          cache: 'npm'
+
+      - name: Install Dependencies
+        run: npm install
+
+      - name: Run Headless Bot
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_UPDATE: ${{ github.event.client_payload.update || github.event.inputs.payload }}
+          TACT_NETWORK: testnet
+        run: node src/bot/headless.js
+
+      - name: Commit and Push Changes
+        run: |
+          git config --global user.name "TemixIDE Bot"
+          git config --global user.email "bot@temixide.local"
+          git add state.json sessions/
+          git diff --quiet && git diff --staged --quiet || (git commit -m "🤖 Bot state update" && git push)

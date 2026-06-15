@@ -1,0 +1,1 @@
+/call Target_structure_DeepDataProbe PoolDataResponse queryId=101 isLocked=0 reserve0=1000 reserve1=1000 token0=kQDZkTAxN7iaSfXyQrDid0g-wnjZXkfcAESW2H2tcp46qqHu token1=kQDZkTAxN7iaSfXyQrDid0g-wnjZXkfcAESW2H2tcp46qqHu additionalData=empty

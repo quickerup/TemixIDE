@@ -3,7 +3,7 @@ const getMainMenu = () => ({
     keyboard: [
       [{ text: '📂 Forge' }, { text: '📂 Contract' }],
       [{ text: '📂 Workspace' }, { text: '📂 Account' }],
-      [{ text: '📂 Sessions' }, { text: '✨ AI Forge' }]
+      [{ text: '📂 Sessions' }]
     ],
     resize_keyboard: true,
     is_persistent: true
