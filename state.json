@@ -1,0 +1,12 @@
+{
+  "currentSession": "default",
+  "sessions": {
+    "default": {
+      "deployed": {},
+      "lastFile": "contract.tact",
+      "txHistory": []
+    }
+  },
+  "authorizedUsers": [],
+  "short": {}
+}
