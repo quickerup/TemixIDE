@@ -29,9 +29,16 @@ jobs:
       - name: Run Headless Bot
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
-          TELEGRAM_UPDATE: ${{ github.event.client_payload.update || github.event.inputs.payload }}
+          CLIENT_PAYLOAD: ${{ toJson(github.event.client_payload.update) }}
+          INPUT_PAYLOAD: ${{ github.event.inputs.payload }}
           TACT_NETWORK: testnet
-        run: node src/bot/headless.js
+        run: |
+          if [ -n "$CLIENT_PAYLOAD" ] && [ "$CLIENT_PAYLOAD" != "null" ]; then
+            export TELEGRAM_UPDATE="$CLIENT_PAYLOAD"
+          else
+            export TELEGRAM_UPDATE="$INPUT_PAYLOAD"
+          fi
+          node src/bot/headless.js
 
       - name: Commit and Push Changes
         run: |
